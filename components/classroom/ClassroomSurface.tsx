@@ -27,6 +27,7 @@
  */
 
 import { Stage } from '@/components/stage';
+import { useCodeMateEmbedMode } from '@/lib/classroom/use-codemate-embed-mode';
 import { ThemeProvider } from '@/lib/hooks/use-theme';
 import { useStageStore } from '@/lib/store';
 import { useSettingsStore } from '@/lib/store/settings';
@@ -78,6 +79,7 @@ export function ClassroomSurface({
   readonly classroomId: string;
   readonly variant?: 'page' | 'pane';
 }) {
+  const codemateEmbed = useCodeMateEmbedMode();
   const { loadFromStorage } = useStageStore();
   const loadedClassroomId = useStageStore((s) => s.stage?.id ?? null);
   const { t } = useI18n();
@@ -290,6 +292,7 @@ export function ClassroomSurface({
   // reference's transport-persistence UI fence has no counterpart here, so it
   // stays a constant false.
   useEffect(() => {
+    if (codemateEmbed) return;
     if (
       !shouldResumeClassroomGeneration({
         loading,
@@ -383,7 +386,7 @@ export function ClassroomSurface({
         log.warn('[Classroom] Media generation resume error:', err);
       });
     }
-  }, [loading, error, mayGenerate, generateRemaining]);
+  }, [codemateEmbed, loading, error, mayGenerate, generateRemaining]);
 
   return (
     <ThemeProvider>
@@ -455,6 +458,7 @@ export function ClassroomSurface({
             <Stage
               classroomId={classroomId}
               onRetryOutline={mayGenerate ? retrySingleOutline : undefined}
+              codemateEmbed={codemateEmbed}
             />
           )}
         </div>

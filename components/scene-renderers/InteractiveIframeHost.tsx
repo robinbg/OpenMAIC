@@ -354,14 +354,17 @@ function PooledIframe({
     visibility: shown ? 'visible' : 'hidden',
     pointerEvents: shown ? 'auto' : 'none',
   };
+  // CSS transforms on an iframe nested inside CodeMate can drop trusted input.
+  // Keep the sandbox and let the interactive HTML adapt to the actual viewport.
+  const embedded = typeof window !== 'undefined' && window.parent !== window;
   const iframeStyle: CSSProperties = {
     position: 'absolute',
     left: viewport && visibleViewport ? viewport.box.left - visibleViewport.left : 0,
     top: viewport && visibleViewport ? viewport.box.top - visibleViewport.top : 0,
-    width: GENUI_LOGICAL_WIDTH,
-    height: GENUI_LOGICAL_HEIGHT,
+    width: embedded ? (viewport?.box.width ?? 0) : GENUI_LOGICAL_WIDTH,
+    height: embedded ? (viewport?.box.height ?? 0) : GENUI_LOGICAL_HEIGHT,
     border: 0,
-    transform: `scale(${viewport?.scale ?? 0})`,
+    transform: embedded ? 'none' : `scale(${viewport?.scale ?? 0})`,
     transformOrigin: 'top left',
   };
 
