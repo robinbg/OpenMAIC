@@ -62,9 +62,11 @@ import { exitProPlaybackToStandalone } from '@/lib/workbench/pro-playback-exit';
 export function Stage({
   classroomId,
   onRetryOutline,
+  codemateEmbed = false,
 }: {
   classroomId?: string;
   onRetryOutline?: (outlineId: string) => Promise<void>;
+  codemateEmbed?: boolean;
 }) {
   const { mode, setMode, scenes, currentSceneId, generatingOutlines, stage } = useStageStore();
   const router = useRouter();
@@ -75,7 +77,7 @@ export function Stage({
     proWorkbenchFlag ? 'pending' : 'off',
   );
   useEffect(() => {
-    if (!proWorkbenchFlag) return;
+    if (!proWorkbenchFlag || codemateEmbed) return;
     let cancelled = false;
     fetch('/api/agent/runtime')
       .then((res) => (res.ok ? res.json() : null))
@@ -88,7 +90,7 @@ export function Stage({
     return () => {
       cancelled = true;
     };
-  }, [proWorkbenchFlag]);
+  }, [proWorkbenchFlag, codemateEmbed]);
   const proWorkbenchEntry = proWorkbenchFlag && proRuntime === 'on';
   const currentScene = useStageStore((s) => s.getCurrentScene());
   // The reference implementation makes editing owner-only. `isOwner` is true for the stage creator and
@@ -194,7 +196,7 @@ export function Stage({
   // transient stage-store mode in an effect — otherwise every hosted course
   // paints PlaybackChromeRoot once before the effect can run, and a course
   // switch can inherit stale mode.
-  const chromeMode = resolveStageChromeMode({
+  const chromeMode = codemateEmbed ? 'playback' : resolveStageChromeMode({
     storedMode: mode,
     hosted,
     workbenchShowingClassroom,
@@ -355,6 +357,7 @@ export function Stage({
           <PlaybackChromeRoot
             ref={playbackRef}
             onInteractivePickerChange={setPlaybackInteractivePicker}
+            codemateEmbed={codemateEmbed}
             onRetryOutline={onRetryOutline}
             canEnterProMode={workbenchPlayback || isEditable}
             onEnterProMode={chromeToggleHandler}
@@ -363,7 +366,7 @@ export function Stage({
               classroomBackControl === 'workbench-return' ? <WorkbenchReturnControl /> : undefined
             }
             hideHeaderBackControl={classroomBackControl === 'hidden'}
-            hideHeader={!classroomHeaderControls.showHeader}
+            hideHeader={codemateEmbed || !classroomHeaderControls.showHeader}
             hideHeaderGlobalControls={!classroomHeaderControls.showGlobalControls}
             hideHeaderCourseActions={!classroomHeaderControls.showCourseActions}
           />

@@ -11,6 +11,8 @@ import {
   type ReactNode,
 } from 'react';
 import { useStageStore } from '@/lib/store';
+import { useCodeMateVisualBridge } from '@/lib/classroom/use-codemate-visual-bridge';
+import type { CodeMateVisualCommand } from '@/lib/classroom/codemate-embed-protocol';
 import { PENDING_SCENE_ID } from '@/lib/store/stage';
 import { useCanvasStore } from '@/lib/store/canvas';
 import { useSettingsStore } from '@/lib/store/settings';
@@ -53,7 +55,7 @@ import {
   AlertDialogAction,
   AlertDialogCancel,
 } from '@/components/ui/alert-dialog';
-import { AlertTriangle } from 'lucide-react';
+import { AlertTriangle, ChevronLeft, ChevronRight, Pause, Play } from 'lucide-react';
 import { VisuallyHidden } from 'radix-ui';
 import type { PPTElement } from '@openmaic/dsl';
 import type { ElementReference } from '@/lib/types/chat';
@@ -95,6 +97,7 @@ export interface PlaybackChromeRootHandle {
 }
 
 interface PlaybackChromeRootProps {
+  readonly codemateEmbed?: boolean;
   readonly onRetryOutline?: (outlineId: string) => Promise<void>;
   /** Whether the Pro Switch in Header should be enabled. */
   readonly canEnterProMode?: boolean;
@@ -129,12 +132,13 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
       hideHeaderGlobalControls,
       hideHeaderCourseActions,
       onInteractivePickerChange,
+      codemateEmbed = false,
     },
     ref,
   ) {
     const { t } = useI18n();
     const {
-      mode,
+      mode: storedMode,
       stage,
       getCurrentScene,
       scenes,
@@ -143,10 +147,13 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
       generatingOutlines,
       outlines,
     } = useStageStore();
+    const mode = codemateEmbed ? 'playback' : storedMode;
     const failedOutlines = useStageStore.use.failedOutlines();
     const generationComplete = useStageStore.use.generationComplete();
 
     const currentScene = getCurrentScene();
+    const [embedEngineScene, setEmbedEngineScene] = useState<string | null>(null);
+    const [embedCommand, setEmbedCommand] = useState<CodeMateVisualCommand | null>(null);
     const piChatEnabled = isPiChatEnabled();
     const coursewareReferenceEnabled = isCoursewareReferenceEnabled();
     const [elementPickActive, setElementPickActiveState] = useState(false);
@@ -748,6 +755,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
           engineRef.current = null;
           setEngineMode('idle');
           activeSceneIdRef.current = currentSceneId;
+          setEmbedEngineScene(currentSceneId);
 
           return;
         }
@@ -839,6 +847,12 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
             }
           },
           onProactiveShow: (trigger) => {
+            // CodeMate owns the conversation; keep presentation playback moving
+            // instead of opening a second native discussion in the embed.
+            if (codemateEmbed) {
+              queueMicrotask(() => { if (engineRef.current === engine) engine.skipDiscussion(); });
+              return;
+            }
             if (!trigger.agentId) {
               // Mutate in-place so engine.currentTrigger also gets the agentId
               // (confirmDiscussion reads agentId from the same object reference)
@@ -943,6 +957,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
 
         engineRef.current = engine;
         activeSceneIdRef.current = currentScene.id;
+        setEmbedEngineScene(currentScene.id);
 
         // Auto-start if triggered by auto-play scene advance
         if (autoStartRef.current) {
@@ -1180,6 +1195,38 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
       }
     }, [playbackCompleted, currentScene, saveSceneResumePosition]);
 
+    const receiveCodeMateCommand = useCallback((command: CodeMateVisualCommand) => {
+      const state = useStageStore.getState();
+      const target = command.sceneId || state.currentSceneId;
+      if (!codemateEmbed || !target || state.stage?.id !== stage?.id
+        || !state.scenes.some((scene) => scene.id === target)) return;
+      autoStartRef.current = false;
+      setEmbedCommand({ ...command, sceneId: target });
+      if (target !== state.currentSceneId) {
+        engineRef.current?.pause();
+        state.setCurrentSceneId(target);
+      }
+    }, [codemateEmbed, stage?.id]);
+
+    useCodeMateVisualBridge({
+      enabled: codemateEmbed, classroomId: stage?.id, scenes, currentSceneId,
+      onCommand: receiveCodeMateCommand,
+    });
+
+    useEffect(() => {
+      if (!codemateEmbed || !embedCommand || embedCommand.sceneId !== currentSceneId
+        || embedEngineScene !== currentSceneId) return;
+      const engine = engineRef.current;
+      if (engine && engine.getCurrentSceneId() !== currentSceneId) return;
+      setEmbedCommand(null);
+      if (!engine) return; // Quizzes and interactive scenes can be shown without a narration engine.
+      const playing = engine.getMode() === 'playing' || engine.getMode() === 'live';
+      if ((embedCommand.action === 'play' && !playing)
+        || (embedCommand.action !== 'play' && playing)) {
+        void handlePlayPause();
+      }
+    }, [codemateEmbed, embedCommand, embedEngineScene, currentSceneId, handlePlayPause]);
+
     // get scene information
     const isPendingScene = currentSceneId === PENDING_SCENE_ID;
     const hasNextPending = generatingOutlines.length > 0;
@@ -1227,7 +1274,8 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
       ? scenes.length
       : scenes.findIndex((s) => s.id === currentSceneId);
     const totalScenesCount = scenes.length + (canAdvanceToPendingSlot ? 1 : 0);
-    const showElementReference = piChatEnabled && coursewareReferenceEnabled && mode === 'playback';
+    const showElementReference =
+      !codemateEmbed && piChatEnabled && coursewareReferenceEnabled && mode === 'playback';
     const canPickSlideElement = Boolean(
       showElementReference &&
       !whiteboardOpen &&
@@ -1582,25 +1630,29 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
     // when entering Pro mode.
     const sceneViewerHeight = (() => {
       const headerHeight = isPresenting || hideHeader ? 0 : 80;
-      const roundtableHeight = mode === 'playback' && !isPresenting ? 192 : 0;
+      const roundtableHeight = codemateEmbed ? 100 : mode === 'playback' && !isPresenting ? 192 : 0;
       return `calc(100% - ${headerHeight + roundtableHeight}px)`;
     })();
 
     return (
       <div
         ref={stageRef}
+        data-codemate-embed={codemateEmbed ? 'true' : undefined}
+        data-classroom-id={codemateEmbed ? stage?.id : undefined}
+        data-scene-id={codemateEmbed ? currentSceneId ?? undefined : undefined}
+        data-playback-mode={codemateEmbed ? engineMode : undefined}
         className={cn(
           'flex-1 flex overflow-hidden bg-gray-50 dark:bg-gray-900',
           isPresenting && !controlsVisible && 'cursor-none',
         )}
       >
-        <SceneSidebar
+        {!codemateEmbed && <SceneSidebar
           collapsed={sidebarCollapsed}
           onCollapseChange={setSidebarCollapsed}
           onSceneSelect={gatedSceneSwitch}
           onRetryOutline={onRetryOutline}
           isCourseComplete={isCourseComplete}
-        />
+        />}
 
         {/* Main Content Area */}
         <div className="flex-1 flex flex-col overflow-hidden min-w-0 relative">
@@ -1687,8 +1739,39 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
             />
           </div>
 
+          {codemateEmbed && (
+            <div className="shrink-0 border-t bg-background px-3 py-2" data-testid="codemate-visual-controls">
+              <div className="flex items-center gap-2">
+                <button type="button" aria-label="上一场景" disabled={currentSceneIndex <= 0}
+                  className="rounded-md border p-2 disabled:opacity-40" onClick={handlePreviousScene}>
+                  <ChevronLeft className="h-4 w-4" />
+                </button>
+                <select aria-label="演示场景" className="min-w-0 flex-1 rounded-md border bg-background px-2 py-1.5 text-sm"
+                  value={currentSceneId ?? ''} onChange={(event) => {
+                    receiveCodeMateCommand({ source: 'codemate', type: 'visual-command', action: 'show', sceneId: event.target.value });
+                  }}>
+                  {scenes.map((scene, index) => <option key={scene.id} value={scene.id}>{index + 1}. {scene.title}</option>)}
+                </select>
+                <button type="button" aria-label={engineMode === 'playing' || engineMode === 'live' ? '暂停讲解' : '播放讲解'}
+                  disabled={!currentScene || !currentScene.actions?.length}
+                  className="inline-flex items-center gap-1 rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground disabled:opacity-40"
+                  onClick={() => { void handlePlayPause(); }}>
+                  {engineMode === 'playing' || engineMode === 'live' ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+                  <span>{engineMode === 'playing' || engineMode === 'live' ? '暂停' : '讲解'}</span>
+                </button>
+                <button type="button" aria-label="下一场景" disabled={currentSceneIndex >= scenes.length - 1}
+                  className="rounded-md border p-2 disabled:opacity-40" onClick={handleNextScene}>
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+              </div>
+              <p className="mt-2 max-h-12 overflow-y-auto text-sm leading-6 text-muted-foreground" aria-live="polite">
+                {lectureSpeech || firstSpeechText || '切换场景查看演示与测验，在左侧继续向 AI 导师提问。'}
+              </p>
+            </div>
+          )}
+
           {/* Roundtable Area */}
-          {mode === 'playback' && (
+          {!codemateEmbed && mode === 'playback' && (
             <div
               className={cn(
                 'transition-opacity duration-300',
@@ -1870,7 +1953,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
         {/* Chat Area — playback / autonomous always renders it here; Pro
           (edit) mode unmounts this whole PlaybackChromeRoot, so the
           edit branch has no chat. */}
-        <div className="flex shrink-0">
+        {!codemateEmbed && <div className="flex shrink-0">
           <ChatArea
             ref={chatAreaRef}
             width={chatAreaWidth}
@@ -1939,7 +2022,7 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
             onSegmentSealed={discussionTTS.handleSegmentSealed}
             shouldHoldAfterReveal={discussionTTS.shouldHold}
           />
-        </div>
+        </div>}
 
         {/* Scene switch confirmation dialog */}
         <AlertDialog

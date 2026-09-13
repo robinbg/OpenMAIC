@@ -1,6 +1,7 @@
 'use client';
 
 import { Stage } from '@/components/stage';
+import { useCodeMateEmbedMode } from '@/lib/classroom/use-codemate-embed-mode';
 import { ThemeProvider } from '@/lib/hooks/use-theme';
 import { useStageStore } from '@/lib/store';
 import { useSettingsStore } from '@/lib/store/settings';
@@ -40,6 +41,7 @@ import { isServerBackedMediaPersistence } from '@/lib/persistence/media-persiste
 const log = createLogger('Classroom');
 
 export default function ClassroomDetailPage() {
+  const codemateEmbed = useCodeMateEmbedMode();
   const params = useParams();
   const classroomId = params?.id as string;
 
@@ -197,7 +199,7 @@ export default function ClassroomDetailPage() {
 
   // Auto-resume generation for pending outlines
   useEffect(() => {
-    if (loading || error || generationStartedRef.current) return;
+    if (codemateEmbed || loading || error || generationStartedRef.current) return;
     // Generation spends the operator's provider budget, and a server-backed
     // course is readable by anyone it was shared with, so a viewer must never
     // start it. `generationStartedRef` is deliberately NOT set here, so the
@@ -280,7 +282,7 @@ export default function ClassroomDetailPage() {
         log.warn('[Classroom] Media generation resume error:', err);
       });
     }
-  }, [loading, error, mayGenerate, generateRemaining]);
+  }, [codemateEmbed, loading, error, mayGenerate, generateRemaining]);
 
   return (
     <ThemeProvider>
@@ -309,7 +311,10 @@ export default function ClassroomDetailPage() {
               </div>
             </div>
           ) : (
-            <Stage onRetryOutline={mayGenerate ? retrySingleOutline : undefined} />
+            <Stage
+              onRetryOutline={mayGenerate ? retrySingleOutline : undefined}
+              codemateEmbed={codemateEmbed}
+            />
           )}
         </div>
       </MediaStageProvider>
