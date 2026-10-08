@@ -26,8 +26,17 @@ export function useCodeMateVisualBridge({ enabled, classroomId, scenes, currentS
       const command = parseCodeMateVisualCommand(event.data, classroomId, current.scenes.map((scene) => scene.id));
       if (command) current.onCommand(command);
     };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing) return;
+      if (stateRef.current.classroomId !== classroomId) return;
+      window.parent.postMessage({ source: 'openmaic', type: 'presentation-escape', classroomId }, parentOrigin);
+    };
     window.addEventListener('message', listener);
-    return () => window.removeEventListener('message', listener);
+    window.addEventListener('keydown', escape);
+    return () => {
+      window.removeEventListener('message', listener);
+      window.removeEventListener('keydown', escape);
+    };
   }, [enabled, classroomId]);
 
   useEffect(() => {
