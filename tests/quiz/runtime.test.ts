@@ -44,6 +44,9 @@ function wrapStore(store: RuntimeStore, overrides: Partial<RuntimeStore>): Runti
 
 describe('quiz attempt runtime persistence', () => {
   beforeEach(() => {
+    // Exercise the optimistic cross-tab fallback even when Node exposes Web Locks.
+    // A native lock would serialize the callers before the race barriers release.
+    vi.stubGlobal('navigator', { locks: undefined });
     Object.defineProperty(globalThis, 'IDBKeyRange', {
       configurable: true,
       value: IDBKeyRange,
@@ -52,6 +55,7 @@ describe('quiz attempt runtime persistence', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   it('coalesces rapid draft changes into one latest snapshot', async () => {

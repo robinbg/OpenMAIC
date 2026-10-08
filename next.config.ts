@@ -1,6 +1,7 @@
 import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
+  distDir: process.env.CODEMATE_OPENMAIC_DIST_DIR || '.next',
   output: process.env.VERCEL ? undefined : 'standalone',
   outputFileTracingIncludes: {
     '/*': [
@@ -33,6 +34,11 @@ const nextConfig: NextConfig = {
     '@aws-sdk/s3-request-presigner',
   ],
   experimental: {
+    // Storage exposes shared browser contracts and Node-only adapters
+    // from its root barrel. Resolve named imports before bundling so a
+    // browser contract cannot pull an unused filesystem or database adapter.
+    optimizePackageImports: ['@openmaic/storage'],
+    cpus: 1, // Bound build workers on the shared CodeMate development host.
     proxyClientMaxBodySize: '200mb',
   },
   async headers() {

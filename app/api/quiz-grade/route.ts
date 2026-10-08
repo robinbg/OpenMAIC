@@ -9,7 +9,9 @@ import { NextRequest } from 'next/server';
 import { callLLM } from '@/lib/ai/llm';
 import { createLogger } from '@/lib/logger';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
-import { resolveModelFromRequest } from '@/lib/server/resolve-model';
+import { resolveModel, resolveModelFromRequest } from '@/lib/server/resolve-model';
+import { DEMO_COOKIE, verifyDemoGrant } from '@/lib/server/codemate-demo-access';
+import { readClassroom } from '@/lib/server/classroom-storage';
 const log = createLogger('Quiz Grade');
 
 interface GradeRequest {
@@ -18,6 +20,9 @@ interface GradeRequest {
   points: number;
   commentPrompt?: string;
   language?: string;
+  classroomId?: string;
+  sceneId?: string;
+  questionId?: string;
 }
 
 interface GradeResponse {
@@ -30,13 +35,48 @@ export async function POST(req: NextRequest) {
   let resolvedPoints: number | undefined;
   try {
     const body = (await req.json()) as GradeRequest;
-    const { question, userAnswer, points, commentPrompt, language } = body;
-    questionSnippet = question?.substring(0, 60);
+    if (!body || typeof body !== 'object')
+      return apiError('INVALID_REQUEST', 400, 'Invalid grading request');
+    const { userAnswer, language } = body;
+    let { question, points, commentPrompt } = body;
+    const demoToken = req.cookies.get(DEMO_COOKIE)?.value;
+    if (demoToken) {
+      const grant = await verifyDemoGrant(demoToken, process.env.CODEMATE_OPENMAIC_LAUNCH_SECRET);
+      if (!grant) return apiError('UNAUTHENTICATED', 401, 'Classroom access expired');
+      if (
+        body.classroomId !== grant.classroomId ||
+        typeof body.sceneId !== 'string' ||
+        typeof body.questionId !== 'string'
+      ) {
+        return apiError('INVALID_REQUEST', 403, 'Question is outside this classroom');
+      }
+      const classroom = await readClassroom(grant.classroomId);
+      const scene = classroom?.scenes.find((item) => item.id === body.sceneId);
+      const stored =
+        scene?.content.type === 'quiz'
+          ? scene.content.questions.find(
+              (item) => item.id === body.questionId && item.type === 'short_answer',
+            )
+          : undefined;
+      if (!stored) return apiError('INVALID_REQUEST', 403, 'Question is outside this classroom');
+      // A launch grant can grade only a real question. Never trust a supplied
+      // prompt, rubric, score limit or provider credentials in this mode.
+      question = stored.question;
+      points = stored.points ?? 1;
+      commentPrompt = stored.commentPrompt;
+    }
+    questionSnippet = typeof question === 'string' ? question.substring(0, 60) : undefined;
     resolvedPoints = points;
 
-    if (!question || !userAnswer) {
+    if (
+      typeof question !== 'string' ||
+      !question.trim() ||
+      typeof userAnswer !== 'string' ||
+      !userAnswer.trim()
+    ) {
       return apiError('MISSING_REQUIRED_FIELD', 400, 'question and userAnswer are required');
     }
+    if (userAnswer.length > 8000) return apiError('INVALID_REQUEST', 400, 'Answer is too long');
 
     // Validate points is a positive finite number
     if (!points || !Number.isFinite(points) || points <= 0) {
@@ -44,11 +84,9 @@ export async function POST(req: NextRequest) {
     }
 
     // Resolve model from request headers/body
-    const { model: languageModel, thinkingConfig } = await resolveModelFromRequest(
-      req,
-      body,
-      'quiz-grade',
-    );
+    const { model: languageModel, thinkingConfig } = demoToken
+      ? await resolveModel({ stage: 'quiz-grade' })
+      : await resolveModelFromRequest(req, body, 'quiz-grade');
 
     const isZh = language === 'zh-CN';
 
@@ -73,6 +111,8 @@ ${commentPrompt ? `Grading guidance: ${commentPrompt}\n` : ''}Student answer: ${
         model: languageModel,
         system: systemPrompt,
         prompt: userPrompt,
+        abortSignal: AbortSignal.timeout(60000),
+        maxRetries: 0,
       },
       'quiz-grade',
       undefined,
@@ -88,18 +128,20 @@ ${commentPrompt ? `Grading guidance: ${commentPrompt}\n` : ''}Student answer: ${
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (!jsonMatch) throw new Error('No JSON found');
       const parsed = JSON.parse(jsonMatch[0]);
+      if (
+        !Number.isFinite(parsed.score) ||
+        parsed.score < 0 ||
+        parsed.score > points ||
+        typeof parsed.comment !== 'string' ||
+        !parsed.comment.trim()
+      )
+        throw new Error('Invalid grade');
       gradeResult = {
         score: Math.max(0, Math.min(points, Math.round(Number(parsed.score)))),
         comment: String(parsed.comment || ''),
       };
     } catch {
-      // Fallback: give partial credit with a generic comment
-      gradeResult = {
-        score: Math.round(points * 0.5),
-        comment: isZh
-          ? '已作答，请参考标准答案。'
-          : 'Answer received. Please refer to the standard answer.',
-      };
+      return apiError('UPSTREAM_ERROR', 502, 'Grading response was invalid; please retry');
     }
 
     return apiSuccess({ ...gradeResult });
