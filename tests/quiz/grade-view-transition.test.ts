@@ -2,6 +2,7 @@
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { expect, it, vi } from 'vitest';
+import { quizViewStateFromAttempt } from '@/lib/quiz/view-state';
 
 const source = readFileSync(
   new URL('../../components/scene-renderers/quiz-view.tsx', import.meta.url),
@@ -32,9 +33,9 @@ const compiled = ts.transpileModule(`const run = ${effect.getText(tree)};`, {
 const results = [
   { questionId: 'short', correct: true, status: 'correct', earned: 10, aiComment: 'correct' },
 ];
-function setup(grade = vi.fn().mockResolvedValue(results[0])) {
+function setup(grade = vi.fn().mockResolvedValue(results[0]), phase = 'grading') {
   const env = {
-    phase: 'grading',
+    phase,
     questions: [{ id: 'short', type: 'short_answer' }],
     answers: { short: '2' },
     locale: 'zh-CN',
@@ -96,4 +97,30 @@ it('unmounted or changed-scene grading cannot publish a delayed result', async (
   expect(env.persistQuizReview).not.toHaveBeenCalled();
   expect(env.setResults).not.toHaveBeenCalled();
   expect(env.setPhase).not.toHaveBeenCalled();
+});
+
+it('restored submitted answers wait for explicit retry before invoking grading', async () => {
+  const restored = quizViewStateFromAttempt({
+    sessionId: 'attempt',
+    status: 'active',
+    phase: 'submitted',
+    answers: { short: '2' },
+  });
+  const { env, cleanup } = setup(undefined, restored.phase);
+  await Promise.resolve();
+
+  expect(cleanup).toBeUndefined();
+  expect(env.answers).toEqual(restored.answers);
+  expect(env.gradeChoiceQuestions).not.toHaveBeenCalled();
+  expect(env.gradeShortAnswerQuestion).not.toHaveBeenCalled();
+  expect(env.persistQuizReview).not.toHaveBeenCalled();
+  expect(env.setResults).not.toHaveBeenCalled();
+  expect(env.setPhase).not.toHaveBeenCalled();
+
+  const retry = setup();
+  await vi.waitFor(() => expect(retry.env.setPhase).toHaveBeenCalledWith('reviewing'));
+  expect(retry.env.persistQuizReview).toHaveBeenCalledWith(
+    expect.objectContaining({ answers: restored.answers, results }),
+    retry.env.runtimeWriter,
+  );
 });

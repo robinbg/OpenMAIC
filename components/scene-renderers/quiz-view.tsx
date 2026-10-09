@@ -867,23 +867,62 @@ export function QuizView({ questions, sceneId, stageId }: QuizViewProps) {
     <div className="w-full h-full bg-gradient-to-b from-gray-50 to-white dark:from-gray-900 dark:to-gray-900 overflow-hidden flex flex-col">
       <AnimatePresence mode="wait">
         {phase === 'grading_failed' && (
-          <motion.div
-            key="grading-failed"
-            role="alert"
-            className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center"
-          >
-            <p>
-              {locale === 'zh-CN'
-                ? '评分暂时不可用，答案已保留，尚未产生分数。请重试。'
-                : 'Grading is unavailable. Your answers are saved and no score has been assigned. Please retry.'}
-            </p>
-            <button
-              type="button"
-              onClick={() => setPhase('grading')}
-              className="rounded-lg bg-violet-600 px-4 py-2 text-white"
+          <motion.div key="grading-failed" className="flex-1 flex flex-col min-h-0">
+            <div
+              role="alert"
+              className="flex shrink-0 flex-col items-center gap-4 px-6 py-5 text-center"
             >
-              {locale === 'zh-CN' ? '重新评分' : 'Retry grading'}
-            </button>
+              <p>
+                {locale === 'zh-CN'
+                  ? '评分暂时不可用，答案已保留，尚未产生分数。请重试。'
+                  : 'Grading is unavailable. Your answers are saved and no score has been assigned. Please retry.'}
+              </p>
+              <button
+                type="button"
+                onClick={() => setPhase('grading')}
+                className="rounded-lg bg-violet-600 px-4 py-2 text-white"
+              >
+                {locale === 'zh-CN' ? '重新评分' : 'Retry grading'}
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+              {questions.map((q, i) => {
+                if (q.type === 'single') {
+                  return (
+                    <SingleChoiceQuestion
+                      key={q.id}
+                      question={q}
+                      index={i}
+                      value={answers[q.id] as string | undefined}
+                      onChange={() => {}}
+                      disabled
+                    />
+                  );
+                }
+                if (q.type === 'multiple') {
+                  return (
+                    <MultipleChoiceQuestion
+                      key={q.id}
+                      question={q}
+                      index={i}
+                      value={answers[q.id] as string[] | undefined}
+                      onChange={() => {}}
+                      disabled
+                    />
+                  );
+                }
+                return (
+                  <ShortAnswerQuestion
+                    key={q.id}
+                    question={q}
+                    index={i}
+                    value={answers[q.id] as string | undefined}
+                    onChange={() => {}}
+                    disabled
+                  />
+                );
+              })}
+            </div>
           </motion.div>
         )}
         {phase === 'not_started' && (
