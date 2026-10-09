@@ -9,7 +9,7 @@ afterEach(() => {
 });
 
 describe('iframe element picker shim', () => {
-  it('stays dormant, blocks armed page clicks, emits picks, syncs pins, and exits', () => {
+  it('stays dormant, blocks armed page clicks, emits picks, syncs pins, and exits', async () => {
     const patched = patchHtmlForIframe(
       '<html><head></head><body><button id="cta">Start</button></body></html>',
     );
@@ -54,6 +54,30 @@ describe('iframe element picker shim', () => {
     expect(pageClick).toHaveBeenCalledTimes(1);
     expect(postMessage).not.toHaveBeenCalled();
 
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', isComposing: true }));
+    const consumed = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+    consumed.preventDefault();
+    window.dispatchEvent(consumed);
+    await Promise.resolve();
+    expect(postMessage).not.toHaveBeenCalled();
+
+    // The shim is installed before a generated page's own window handlers.
+    // A handler added afterward must still be able to consume Escape.
+    window.addEventListener('keydown', (event) => event.preventDefault(), { once: true });
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', cancelable: true }));
+    await Promise.resolve();
+    expect(postMessage).not.toHaveBeenCalled();
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(postMessage).not.toHaveBeenCalled();
+    await Promise.resolve();
+    expect(postMessage).toHaveBeenCalledExactlyOnceWith(
+      { __maicInteractive: true, kind: 'presentation-escape' },
+      '*',
+    );
+    postMessage.mockClear();
+
     window.dispatchEvent(
       new MessageEvent('message', {
         source: window,
@@ -85,10 +109,14 @@ describe('iframe element picker shim', () => {
     expect(document.querySelector('[data-maic-picker-pin]')?.textContent).toBe('1');
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await Promise.resolve();
     expect(document.querySelector('[data-maic-element-picker-overlay]')).toBeNull();
     expect(postMessage).toHaveBeenCalledWith(
       { __maicInteractive: true, kind: 'element-picker-disarmed' },
       '*',
+    );
+    expect(postMessage.mock.calls.some(([data]) => data.kind === 'presentation-escape')).toBe(
+      false,
     );
   });
 });

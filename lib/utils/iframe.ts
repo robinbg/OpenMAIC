@@ -228,6 +228,16 @@ const ELEMENT_PICKER_SHIM = `<script data-iframe-element-picker-shim>
     });
     scheduleDraw();
   }
+  // Only unconsumed playback Escape leaves the sandbox. An armed picker
+  // handles Escape locally in its capture listener and must keep that behavior.
+  window.addEventListener('keydown', function (event) {
+    if (armed || event.key !== 'Escape' || event.defaultPrevented || event.isComposing) return;
+    // Page handlers registered after the shim may still consume this key.
+    Promise.resolve().then(function () {
+      if (armed || event.defaultPrevented || event.isComposing) return;
+      emit({ __maicInteractive: true, kind: 'presentation-escape' });
+    });
+  });
   function onKey(event) {
     if (!armed || event.key !== 'Escape') return;
     event.preventDefault();
