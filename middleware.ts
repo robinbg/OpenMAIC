@@ -1,7 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { isAgentRuntimeConfigured, isProWorkbenchEnabled } from '@/lib/config/feature-flags';
-import { DEMO_COOKIE, demoRequestAllowed, verifyDemoGrant } from '@/lib/server/codemate-demo-access';
+import {
+  DEMO_COOKIE,
+  demoRequestAllowed,
+  verifyDemoGrant,
+} from '@/lib/server/codemate-demo-access';
+import { getAiojClassroomId, getAiojParentOrigin } from '@/lib/config/codemate-integration';
 
 /** Convert string to Uint8Array */
 function encode(str: string): Uint8Array {
@@ -59,9 +64,20 @@ export async function middleware(request: NextRequest) {
   }
 
   // Launch/status must remain reachable so an expired demo can be replaced.
-  if (request.method === 'GET' && (
-    pathname === '/api/access-code/codemate' || pathname === '/api/access-code/status'
-  )) return NextResponse.next();
+  if (
+    request.method === 'GET' &&
+    (pathname === '/api/access-code/codemate' || pathname === '/api/access-code/status')
+  )
+    return NextResponse.next();
+
+  // Only the empty classroom HTML shell can recover an expired/cross-classroom
+  // AIOJ grant. Data, audio and grading remain scoped below and fail closed.
+  if (
+    request.method === 'GET' &&
+    getAiojParentOrigin(process.env.NEXT_PUBLIC_CODEMATE_PARENT_ORIGIN) &&
+    getAiojClassroomId(pathname)
+  )
+    return NextResponse.next();
 
   // Demo grants are scoped before normal access-code handling, even when the
   // browser also has an older full-access cookie. Invalid/expired demo cookies
@@ -69,9 +85,14 @@ export async function middleware(request: NextRequest) {
   const demoCookie = request.cookies.get(DEMO_COOKIE)?.value;
   if (demoCookie) {
     const grant = await verifyDemoGrant(demoCookie, process.env.CODEMATE_OPENMAIC_LAUNCH_SECRET);
-    if (grant && demoRequestAllowed(request.method, request.nextUrl, grant)) return NextResponse.next();
+    if (grant && demoRequestAllowed(request.method, request.nextUrl, grant))
+      return NextResponse.next();
     return NextResponse.json(
-      { success: false, errorCode: 'INVALID_REQUEST', error: 'Read-only classroom access required' },
+      {
+        success: false,
+        errorCode: 'INVALID_REQUEST',
+        error: 'Read-only classroom access required',
+      },
       { status: grant ? 403 : 401, headers: { 'Cache-Control': 'no-store' } },
     );
   }

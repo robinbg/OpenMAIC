@@ -11,6 +11,7 @@ import { Toaster } from '@/components/ui/sonner';
 import { ServerProvidersInit } from '@/components/server-providers-init';
 import { StorageHealthNotice } from '@/components/storage-health-notice';
 import { AccessCodeGuard } from '@/components/access-code-guard';
+import { getAiojParentOrigin } from '@/lib/config/codemate-integration';
 import { ProSwapWatcher } from '@/components/workbench/ProSwapWatcher';
 
 // The UI font is loaded from @fontsource's stylesheet rather than next/font,
@@ -28,11 +29,18 @@ import { ProSwapWatcher } from '@/components/workbench/ProSwapWatcher';
 // next/font's generated class.
 import '@fontsource-variable/inter';
 
-export const metadata: Metadata = {
-  title: 'OpenMAIC',
-  description:
-    'The open-source AI interactive classroom. Upload a PDF to instantly generate an immersive, multi-agent learning experience.',
-};
+const aiojParentOrigin = getAiojParentOrigin(process.env.NEXT_PUBLIC_CODEMATE_PARENT_ORIGIN);
+
+export const metadata: Metadata = aiojParentOrigin
+  ? {
+      title: '多模态互动课堂',
+      description: 'AIOJ 多模态互动课堂：观察代码运行、听讲解并动手验证。',
+    }
+  : {
+      title: 'OpenMAIC',
+      description:
+        'The open-source AI interactive classroom. Upload a PDF to instantly generate an immersive, multi-agent learning experience.',
+    };
 
 export default function RootLayout({
   children,
@@ -49,7 +57,7 @@ export default function RootLayout({
           <I18nProvider>
             <ServerProvidersInit />
             <ProSwapWatcher />
-            <AccessCodeGuard>{children}</AccessCodeGuard>
+            <AccessCodeGuard parentOrigin={aiojParentOrigin}>{children}</AccessCodeGuard>
             <Toaster position="top-center" />
             {/* After the Toaster: this one raises a toast on mount when
                 persistence is already broken, and a toast raised before its
