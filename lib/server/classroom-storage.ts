@@ -2,6 +2,11 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import type { NextRequest } from 'next/server';
 import type { Scene, Stage } from '@/lib/types/stage';
+import {
+  ClassroomAudioImportError,
+  prepareClassroomAudioAssets,
+  persistClassroomAudioAssets,
+} from '@/lib/server/classroom-audio-import';
 
 export const CLASSROOMS_DIR = path.join(process.cwd(), 'data', 'classrooms');
 export const CLASSROOM_JOBS_DIR = path.join(process.cwd(), 'data', 'classroom-jobs');
@@ -63,13 +68,25 @@ export async function persistClassroom(
     id: string;
     stage: Stage;
     scenes: Scene[];
+    audioAssets?: unknown;
   },
   baseUrl: string,
 ): Promise<PersistedClassroomData & { url: string }> {
+  if (typeof data.id !== 'string' || !isValidClassroomId(data.id)) {
+    throw new ClassroomAudioImportError('Invalid classroom id');
+  }
+  const scenes = structuredClone(data.scenes);
+  const audioAssets = prepareClassroomAudioAssets(scenes, data.audioAssets);
+  await persistClassroomAudioAssets(
+    audioAssets,
+    path.join(CLASSROOMS_DIR, data.id, 'audio'),
+    `/api/classroom-media/${data.id}/audio`,
+    scenes,
+  );
   const classroomData: PersistedClassroomData = {
     id: data.id,
     stage: data.stage,
-    scenes: data.scenes,
+    scenes,
     createdAt: new Date().toISOString(),
   };
 

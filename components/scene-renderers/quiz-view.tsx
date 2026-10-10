@@ -15,7 +15,6 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useI18n } from '@/lib/hooks/use-i18n';
-import { getCurrentModelConfig } from '@/lib/utils/model-config';
 import { createLogger } from '@/lib/logger';
 
 const log = createLogger('QuizView');
@@ -23,6 +22,7 @@ import type { QuizQuestion } from '@/lib/types/stage';
 import { SpeechButton } from '@/components/audio/speech-button';
 import { gradeChoiceQuestions, isShortAnswer, type QuestionResult } from '@/lib/quiz/grading';
 import { renderQuizMathText } from '@/lib/quiz/math-text';
+import { gradeShortAnswerQuestion } from '@/lib/quiz/short-answer';
 import { writeDraftRecovery } from '@/lib/quiz/persistence';
 import {
   createQuizAttemptWriter,
@@ -44,7 +44,13 @@ import {
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-type Phase = 'not_started' | 'answering' | 'submitting' | 'grading' | 'reviewing';
+type Phase =
+  | 'not_started'
+  | 'answering'
+  | 'submitting'
+  | 'grading'
+  | 'grading_failed'
+  | 'reviewing';
 
 interface QuizViewProps {
   readonly questions: QuizQuestion[];
@@ -88,61 +94,6 @@ const QuizMathText = memo(function QuizMathText({
     </span>
   );
 });
-
-/** Call /api/quiz-grade for a single short-answer question. */
-async function gradeShortAnswerQuestion(
-  q: QuizQuestion,
-  userAnswer: string,
-  language: string,
-): Promise<QuestionResult> {
-  const pts = q.points ?? 1;
-  try {
-    const modelConfig = getCurrentModelConfig();
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'x-model': modelConfig.modelString,
-      'x-api-key': modelConfig.apiKey,
-    };
-    if (modelConfig.baseUrl) headers['x-base-url'] = modelConfig.baseUrl;
-    if (modelConfig.providerType) headers['x-provider-type'] = modelConfig.providerType;
-
-    const res = await fetch('/api/quiz-grade', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        question: q.question,
-        userAnswer,
-        points: pts,
-        commentPrompt: q.commentPrompt,
-        language,
-      }),
-    });
-
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = (await res.json()) as { score: number; comment: string };
-    const earned = Math.max(0, Math.min(pts, data.score));
-    return {
-      questionId: q.id,
-      correct: earned >= pts * 0.8,
-      status: earned >= pts * 0.8 ? 'correct' : 'incorrect',
-      earned,
-      aiComment: data.comment,
-    };
-  } catch (err) {
-    log.error('[quiz-view] AI grading failed for', q.id, err);
-    // Fallback: give half credit
-    return {
-      questionId: q.id,
-      correct: null,
-      status: 'incorrect',
-      earned: Math.round(pts * 0.5),
-      aiComment:
-        language === 'zh-CN'
-          ? '评分服务暂时不可用，已给予基础分。'
-          : 'Grading service unavailable. Base score given.',
-    };
-  }
-}
 
 // ─── Sub-components ─────────────────────────────────────────────────────────
 
@@ -797,6 +748,7 @@ export function QuizView({ questions, sceneId, stageId }: QuizViewProps) {
   useEffect(() => {
     if (phase !== 'grading') return;
     let cancelled = false;
+    const controller = new AbortController();
 
     (async () => {
       // 1. Grade choice questions locally (instant)
@@ -806,7 +758,13 @@ export function QuizView({ questions, sceneId, stageId }: QuizViewProps) {
       const shortAnswerQs = questions.filter(isShortAnswer);
       const aiResults = await Promise.all(
         shortAnswerQs.map((q) =>
-          gradeShortAnswerQuestion(q, (answers[q.id] as string) ?? '', locale),
+          gradeShortAnswerQuestion(
+            q,
+            (answers[q.id] as string) ?? '',
+            locale,
+            { classroomId: stageId, sceneId },
+            controller.signal,
+          ),
         ),
       );
 
@@ -836,10 +794,14 @@ export function QuizView({ questions, sceneId, stageId }: QuizViewProps) {
       if (cancelled) return;
       setResults(ordered);
       setPhase('reviewing');
-    })();
+    })().catch((error) => {
+      log.warn('Quiz grading did not complete:', error);
+      if (!cancelled) setPhase('grading_failed');
+    });
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [phase, questions, answers, locale, sceneId, stageId, attemptId, runtimeWriter]);
 
@@ -904,6 +866,65 @@ export function QuizView({ questions, sceneId, stageId }: QuizViewProps) {
   return (
     <div className="w-full h-full bg-gradient-to-b from-gray-50 to-white dark:from-gray-900 dark:to-gray-900 overflow-hidden flex flex-col">
       <AnimatePresence mode="wait">
+        {phase === 'grading_failed' && (
+          <motion.div key="grading-failed" className="flex-1 flex flex-col min-h-0">
+            <div
+              role="alert"
+              className="flex shrink-0 flex-col items-center gap-4 px-6 py-5 text-center"
+            >
+              <p>
+                {locale === 'zh-CN'
+                  ? '评分暂时不可用，答案已保留，尚未产生分数。请重试。'
+                  : 'Grading is unavailable. Your answers are saved and no score has been assigned. Please retry.'}
+              </p>
+              <button
+                type="button"
+                onClick={() => setPhase('grading')}
+                className="rounded-lg bg-violet-600 px-4 py-2 text-white"
+              >
+                {locale === 'zh-CN' ? '重新评分' : 'Retry grading'}
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+              {questions.map((q, i) => {
+                if (q.type === 'single') {
+                  return (
+                    <SingleChoiceQuestion
+                      key={q.id}
+                      question={q}
+                      index={i}
+                      value={answers[q.id] as string | undefined}
+                      onChange={() => {}}
+                      disabled
+                    />
+                  );
+                }
+                if (q.type === 'multiple') {
+                  return (
+                    <MultipleChoiceQuestion
+                      key={q.id}
+                      question={q}
+                      index={i}
+                      value={answers[q.id] as string[] | undefined}
+                      onChange={() => {}}
+                      disabled
+                    />
+                  );
+                }
+                return (
+                  <ShortAnswerQuestion
+                    key={q.id}
+                    question={q}
+                    index={i}
+                    value={answers[q.id] as string | undefined}
+                    onChange={() => {}}
+                    disabled
+                  />
+                );
+              })}
+            </div>
+          </motion.div>
+        )}
         {phase === 'not_started' && (
           <motion.div
             key="cover"

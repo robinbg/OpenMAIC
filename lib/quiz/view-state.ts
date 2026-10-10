@@ -73,7 +73,7 @@ export async function persistQuizReview(
 }
 
 export interface QuizViewHydratedState {
-  phase: 'not_started' | 'answering' | 'reviewing';
+  phase: 'not_started' | 'answering' | 'grading_failed' | 'reviewing';
   answers: QuizAnswers;
   results: QuestionResult[];
 }
@@ -88,6 +88,12 @@ export function quizViewStateFromAttempt(
       answers: state.answers,
       results: state.results ?? [],
     };
+  }
+  // A submitted snapshot is immutable while grading is incomplete. Restore
+  // it read-only and wait for an explicit retry instead of accepting drafts
+  // that the monotonic runtime lifecycle would correctly ignore.
+  if (state.phase === 'submitted') {
+    return { phase: 'grading_failed', answers: state.answers, results: [] };
   }
   if (state.phase === 'draft' && Object.keys(state.answers).length === 0) {
     return { phase: 'not_started', answers: {}, results: [] };

@@ -10,7 +10,7 @@ import {
 } from '@/lib/quiz/view-state';
 
 describe('quiz view runtime hydration', () => {
-  it('hydrates a draft or submission back into answering', () => {
+  it('hydrates a draft back into answering', () => {
     expect(
       quizViewStateFromAttempt({
         sessionId: 'attempt-1',
@@ -19,6 +19,18 @@ describe('quiz view runtime hydration', () => {
         answers: { q1: 'A' },
       }),
     ).toEqual({ phase: 'answering', answers: { q1: 'A' }, results: [] });
+  });
+
+  it('restores an ungraded submission read-only for explicit grading retry', () => {
+    const answers = { single: 'A', multiple: ['B', 'C'], short: 'saved answer' };
+    const restored = quizViewStateFromAttempt({
+      sessionId: 'attempt-1',
+      status: 'active',
+      phase: 'submitted',
+      answers,
+    });
+    expect(restored).toEqual({ phase: 'grading_failed', answers, results: [] });
+    expect(restored.answers).toBe(answers);
   });
 
   it('hydrates reviewed empty results into reviewing', () => {

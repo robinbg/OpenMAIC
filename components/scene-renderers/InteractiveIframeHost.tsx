@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { useWidgetIframeStore } from '@/lib/store/widget-iframe';
+import { relayInteractivePresentationEscape } from '@/lib/classroom/interactive-presentation-escape';
 import {
   useInteractiveIframePool,
   type IframePoolEntry,
@@ -156,6 +157,7 @@ interface PooledIframeProps {
 function PooledIframe({ sceneId, entry, visible }: PooledIframeProps) {
   const { t } = useI18n();
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const presentationVisibleRef = useRef(false);
   const registerIframe = useWidgetIframeStore((s) => s.registerIframe);
   const getSendMessage = useWidgetIframeStore((s) => s.getSendMessage);
   const pickTarget = useCanvasStore.use.pickTarget();
@@ -211,6 +213,15 @@ function PooledIframe({ sceneId, entry, visible }: PooledIframeProps) {
         | (InteractivePickerMessage & { errorKind?: string; message?: unknown })
         | undefined;
       if (!d || d.__maicInteractive !== true) return;
+      if (d.kind === 'presentation-escape') {
+        relayInteractivePresentationEscape(e, {
+          iframeWindow: iframeRef.current?.contentWindow,
+          visible: presentationVisibleRef.current,
+          sceneId,
+          host: window,
+        });
+        return;
+      }
       if (d.kind === 'runtime-error') {
         const kind = typeof d.errorKind === 'string' ? d.errorKind : 'error';
         const msg = typeof d.message === 'string' ? d.message : String(d.message ?? '');
@@ -247,6 +258,13 @@ function PooledIframe({ sceneId, entry, visible }: PooledIframeProps) {
     visibleViewport.height > 0 &&
     rect.width > 0 &&
     rect.height > 0;
+  // Match the committed visibility before any delayed iframe message can run.
+  useLayoutEffect(() => {
+    presentationVisibleRef.current = shown;
+    return () => {
+      presentationVisibleRef.current = false;
+    };
+  }, [shown]);
   const wrapStyle: CSSProperties = {
     position: 'fixed',
     left: visibleViewport?.left ?? 0,
@@ -259,14 +277,17 @@ function PooledIframe({ sceneId, entry, visible }: PooledIframeProps) {
     visibility: shown ? 'visible' : 'hidden',
     pointerEvents: shown ? 'auto' : 'none',
   };
+  // CSS transforms on an iframe nested inside CodeMate can drop trusted input.
+  // Keep the sandbox and let the interactive HTML adapt to the actual viewport.
+  const embedded = typeof window !== 'undefined' && window.parent !== window;
   const iframeStyle: CSSProperties = {
     position: 'absolute',
     left: viewport && visibleViewport ? viewport.box.left - visibleViewport.left : 0,
     top: viewport && visibleViewport ? viewport.box.top - visibleViewport.top : 0,
-    width: GENUI_LOGICAL_WIDTH,
-    height: GENUI_LOGICAL_HEIGHT,
+    width: embedded ? (viewport?.box.width ?? 0) : GENUI_LOGICAL_WIDTH,
+    height: embedded ? (viewport?.box.height ?? 0) : GENUI_LOGICAL_HEIGHT,
     border: 0,
-    transform: `scale(${viewport?.scale ?? 0})`,
+    transform: embedded ? 'none' : `scale(${viewport?.scale ?? 0})`,
     transformOrigin: 'top left',
   };
 

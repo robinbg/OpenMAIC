@@ -8,6 +8,10 @@ import {
   readClassroom,
 } from '@/lib/server/classroom-storage';
 import { createLogger } from '@/lib/logger';
+import {
+  ClassroomAudioImportError,
+  MAX_CLASSROOM_AUDIO_BYTES,
+} from '@/lib/server/classroom-audio-import';
 
 const log = createLogger('Classroom API');
 
@@ -15,12 +19,16 @@ export async function POST(request: NextRequest) {
   let stageId: string | undefined;
   let sceneCount: number | undefined;
   try {
+    // Base64 plus ordinary scene content; reject obvious oversized transports before parsing.
+    if (Number(request.headers.get('content-length') || 0) > MAX_CLASSROOM_AUDIO_BYTES * 1.5) {
+      return apiError(API_ERROR_CODES.INVALID_REQUEST, 413, 'Classroom import is too large');
+    }
     const body = await request.json();
-    const { stage, scenes } = body;
+    const { stage, scenes, audioAssets } = body;
     stageId = stage?.id;
     sceneCount = scenes?.length;
 
-    if (!stage || !scenes) {
+    if (!stage || !Array.isArray(scenes)) {
       return apiError(
         API_ERROR_CODES.MISSING_REQUIRED_FIELD,
         400,
@@ -31,10 +39,16 @@ export async function POST(request: NextRequest) {
     const id = stage.id || randomUUID();
     const baseUrl = buildRequestOrigin(request);
 
-    const persisted = await persistClassroom({ id, stage: { ...stage, id }, scenes }, baseUrl);
+    const persisted = await persistClassroom(
+      { id, stage: { ...stage, id }, scenes, audioAssets },
+      baseUrl,
+    );
 
     return apiSuccess({ id: persisted.id, url: persisted.url }, 201);
   } catch (error) {
+    if (error instanceof ClassroomAudioImportError) {
+      return apiError(API_ERROR_CODES.INVALID_REQUEST, 400, error.message);
+    }
     log.error(
       `Classroom storage failed [stageId=${stageId ?? 'unknown'}, scenes=${sceneCount ?? 0}]:`,
       error,
