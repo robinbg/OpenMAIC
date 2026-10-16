@@ -6,6 +6,7 @@
  */
 
 import { nanoid } from 'nanoid';
+import { parse, type DefaultTreeAdapterTypes } from 'parse5';
 import katex from 'katex';
 import type {
   Action,
@@ -31,6 +32,7 @@ import type {
 } from './outline-types.js';
 import { DEFAULT_LANGUAGE_DIRECTIVE } from './outline-generator.js';
 import { postProcessInteractiveHtml } from './interactive-post-processor.js';
+import { checkWidgetIdentifiers } from './widget-js-identifiers.js';
 import { parseActionsFromStructuredOutput } from './action-parser.js';
 import { parseJsonResponse } from './json-repair.js';
 import {
@@ -40,6 +42,7 @@ import {
 } from './prompt-formatters.js';
 import type { PromptId } from './prompts/types.js';
 import { buildPrompt, PROMPT_IDS } from './prompts/index.js';
+import { withSourceRequirement, validateSourceRequirements } from './source-requirement.js';
 import type {
   GeneratedInteractiveContent,
   GeneratedPBLContent,
@@ -70,6 +73,132 @@ const INTERACTIVE_WIDGET_ACTIONS = [
   'widget_reveal',
 ];
 
+function correctionWidgetActionError(reason: string): never {
+  throw Object.assign(new Error(`Invalid correction widget actions: ${reason}`), {
+    name: 'CorrectionWidgetActionError',
+    isRetryable: false,
+  });
+}
+
+/** Parse actual HTML elements; template/noscript contents are not live controls. */
+function correctionWidgetElements(html: string): Map<string, DefaultTreeAdapterTypes.Element> {
+  const duplicateAttributes: number[] = [];
+  const document = parse(html, {
+    scriptingEnabled: true,
+    sourceCodeLocationInfo: true,
+    onParseError: (error) => {
+      if (error.code === 'duplicate-attribute') duplicateAttributes.push(error.startOffset);
+    },
+  });
+  const elements = new Map<string, DefaultTreeAdapterTypes.Element>();
+  function visit(node: DefaultTreeAdapterTypes.Node): void {
+    if ('tagName' in node) {
+      const startTag = node.sourceCodeLocation?.startTag;
+      if (
+        startTag &&
+        duplicateAttributes.some(
+          (offset) => offset >= startTag.startOffset && offset < startTag.endOffset,
+        )
+      ) {
+        correctionWidgetActionError('ambiguous_attributes');
+      }
+      const id = node.attrs.find((attribute) => attribute.name === 'id')?.value;
+      if (id) {
+        if (elements.has(id)) correctionWidgetActionError('duplicate_element_id');
+        elements.set(id, node);
+      }
+      if (node.tagName === 'template' || node.tagName === 'noscript') return;
+    }
+    if ('childNodes' in node) node.childNodes.forEach(visit);
+  }
+  visit(document);
+  return elements;
+}
+
+function correctionWidgetConfig(elements: Map<string, DefaultTreeAdapterTypes.Element>): void {
+  const node = elements.get('widget-config');
+  if (
+    !node ||
+    node.namespaceURI !== 'http://www.w3.org/1999/xhtml' ||
+    node.tagName !== 'script' ||
+    node.attrs
+      .find((attribute) => attribute.name === 'type')
+      ?.value.trim()
+      .toLowerCase() !== 'application/json'
+  ) {
+    correctionWidgetActionError('missing_or_invalid_variable_schema');
+  }
+  let config: unknown;
+  try {
+    config = JSON.parse(
+      node.childNodes.map((child) => ('value' in child ? child.value : '')).join(''),
+    );
+  } catch {
+    correctionWidgetActionError('missing_or_invalid_variable_schema');
+  }
+  const variables =
+    config && typeof config === 'object' && !Array.isArray(config)
+      ? (config as Record<string, unknown>).exposedVariables
+      : undefined;
+  if (
+    !Array.isArray(variables) ||
+    variables.some((key) => typeof key !== 'string' || !key.trim()) ||
+    new Set(variables).size !== variables.length
+  ) {
+    correctionWidgetActionError('missing_or_invalid_variable_schema');
+  }
+}
+
+/** Structure only: this does not prove visibility, listener behavior or teaching correctness. */
+function correctionWidgetGuidance(
+  content: GeneratedInteractiveContent,
+  targetLanguage?: string,
+): Action[] {
+  const elements = correctionWidgetElements(content.html);
+  correctionWidgetConfig(elements);
+  // This AIOJ host currently has an explicit Simplified Chinese teaching contract.
+  // Do not infer a locale from source code, lesson prose or a free-form directive.
+  if (targetLanguage !== 'zh-CN') correctionWidgetActionError('unsupported_guidance_locale');
+  for (const [id, role] of [
+    ['step-next', 'next'],
+    ['step-back', 'back'],
+    ['step-reset', 'reset'],
+    ['step-status', 'status'],
+    ['step-progress', 'progress'],
+  ]) {
+    const node = elements.get(id);
+    const attribute = (name: string) => node?.attrs.find((item) => item.name === name)?.value;
+    const button = role === 'next' || role === 'back' || role === 'reset';
+    if (
+      !node ||
+      node.namespaceURI !== 'http://www.w3.org/1999/xhtml' ||
+      ['script', 'style', 'template', 'noscript'].includes(node.tagName) ||
+      attribute('data-role') !== role ||
+      (button && (node.tagName !== 'button' || attribute('type')?.toLowerCase() !== 'button'))
+    ) {
+      correctionWidgetActionError('missing_or_invalid_controls');
+    }
+  }
+  const speech = (text: string): Action => ({ id: `action_${nanoid(8)}`, type: 'speech', text });
+  const highlight = (target: string, content: string): Action => ({
+    id: `action_${nanoid(8)}`,
+    type: 'widget_highlight',
+    target,
+    content,
+  });
+  return [
+    speech(
+      '这里是本课的手算示意。请先核对页面标注的输入、原始提交与参考修复；它不代表原程序实际运行或评测结果。',
+    ),
+    highlight('#step-status', '先查看页面当前显示的状态与进度。'),
+    highlight('#step-next', '需要继续观察时，可点击前进。'),
+    speech('每次点击前进后，看看当时显示的变量和说明，再对照源码想一想：这一步做了什么。'),
+    highlight('#step-back', '需要比较前一状态时，可点击后退。'),
+    highlight('#step-reset', '需要重新观察时，可以点击重置，再从头试一试。'),
+    speech('你可以按自己的节奏多试几次：先预测，再点击前进对照；想重新比较时，就后退或重置。'),
+  ];
+}
+
 // ── Options interfaces for scene generation functions ──
 
 export type SceneContentFailureCode = 'prompt-unavailable' | 'invalid-model-output';
@@ -97,7 +226,7 @@ export interface SceneContentOptions {
   languageDirective?: string;
   /** Authoritative UI locale selected by the user, consumed by the PBL v2 planner. */
   targetLanguage?: string;
-  /** Original course request/profile, used by PBL v2 for explicit learner-level signals. */
+  /** Complete original request/material, used by every content prompt as user data. */
   userRequirements?: UserRequirements;
   allowProceduralSkill?: boolean;
   /**
@@ -123,7 +252,10 @@ export interface SceneActionsOptions {
   agents?: AgentInfo[];
   userProfile?: string;
   languageDirective?: string;
+  userRequirements?: UserRequirements;
   logger?: GenerationLogger;
+  /** Explicit BCP-47 teaching locale for deterministic platform guidance. */
+  targetLanguage?: string;
 }
 
 // ==================== Backward Compatibility Helpers ====================
@@ -250,6 +382,11 @@ export async function generateSceneContent(
     editDirective,
     baselineContent,
   } = options;
+  validateSourceRequirements(userRequirements);
+  // Interactive and PBL own source binding; each actual call receives one complete data block.
+  if (outline.type !== 'pbl' && outline.type !== 'interactive') {
+    aiCall = withSourceRequirement(aiCall, userRequirements);
+  }
 
   // Unified path for interactive scenes (both normal and ultra mode)
   if (outline.type === 'interactive') {
@@ -273,6 +410,7 @@ export async function generateSceneContent(
 
     // Route to widget generation (handles all 5 types)
     return generateWidgetContent(outline, aiCall, languageDirective, {
+      userRequirements,
       allowProceduralSkill,
       logger: log,
       onFailure: options.onFailure,
@@ -295,6 +433,7 @@ export async function generateSceneContent(
         baselineContent,
         log,
         options.onFailure,
+        userRequirements?.codeContextRequired === true,
       );
     case 'quiz':
       return generateQuizContent(outline, aiCall, languageDirective, log, options.onFailure);
@@ -613,6 +752,7 @@ async function generateSlideContent(
   baselineContent?: GeneratedSlideContent,
   log: GenerationLogger = noopGenerationLogger,
   onFailure?: (failure: SceneContentFailure) => void,
+  codeBoundCorrection = false,
 ): Promise<GeneratedSlideContent | null> {
   // Build assigned images description for the prompt
   let assignedImagesText = '无可用图片，禁止插入任何 image 元素';
@@ -769,6 +909,17 @@ async function generateSlideContent(
       `${instructionBlock}\n` +
       `Preserve everything the instruction does not mention.${imageRule} ` +
       `Return the full updated slide content in the same schema.`;
+  }
+
+  if (codeBoundCorrection) {
+    userPrompt += `
+
+## Source-bound correction slide profile
+Use compact JSON and the fewest readable text/code blocks needed; omit decorative shapes, repeated headings and repeated prose.
+Keep every evidence-backed independent cause, its trigger and necessary original values. Show each complete repair visibly at its original source location, preserving source operators/whitespace; do not leave the repair only in speech or later quiz feedback. If the original is correct, explain why and do not invent a repair.
+Do not impose a hard element, character or cause count, drop required changes, or shrink text to illegibility. Keep original submission, reference repair and any hand simulation distinct; reference validation supports only its supplied scope, and unknown remains unknown.
+The complete source data is unchanged. These presentation choices do not replace the existing final content review.
+`;
   }
 
   const response = await aiCall(prompts.system, userPrompt, visionImages);
@@ -1007,6 +1158,7 @@ async function generatePBLSceneContent(
     courseContext: {
       allOutlines: [outline],
       languageDirective: languageDirective || DEFAULT_LANGUAGE_DIRECTIVE,
+      ...(userRequirements ? { userRequirements } : {}),
     },
     user: userRequirements
       ? {
@@ -1119,12 +1271,16 @@ export async function generateWidgetContent(
   aiCall: AICallFn,
   languageDirective?: string,
   options: {
+    userRequirements?: UserRequirements;
     allowProceduralSkill?: boolean;
     logger?: GenerationLogger;
     onFailure?: (failure: SceneContentFailure) => void;
   } = {},
 ): Promise<GeneratedInteractiveContent | null> {
   const log = options.logger ?? noopGenerationLogger;
+  aiCall = withSourceRequirement(aiCall, options.userRequirements);
+  // Source validation above must succeed before the trusted host flag selects this profile.
+  const codeBoundCorrection = options.userRequirements?.codeContextRequired === true;
   const widgetType = outline.widgetType;
   const widgetOutline = outline.widgetOutline;
 
@@ -1139,7 +1295,9 @@ export async function generateWidgetContent(
 
   switch (widgetType) {
     case 'simulation':
-      promptId = PROMPT_IDS.SIMULATION_CONTENT;
+      promptId = codeBoundCorrection
+        ? PROMPT_IDS.CORRECTION_INTERACTIVE_CONTENT
+        : PROMPT_IDS.SIMULATION_CONTENT;
       variables = {
         conceptName: widgetOutline.concept || outline.title,
         conceptOverview: outline.description,
@@ -1246,6 +1404,15 @@ export async function generateWidgetContent(
     log.error(`Failed to extract HTML from ${widgetType} response for: ${outline.title}`);
     options.onFailure?.({ code: 'invalid-model-output' });
     return null;
+  }
+
+  if (codeBoundCorrection && widgetType === 'simulation') {
+    const checked = checkWidgetIdentifiers(html);
+    if (!checked.ok) {
+      log.warn(`Rejected correction widget identifier check (${checked.kind})`);
+      options.onFailure?.({ code: 'invalid-model-output' });
+      return null;
+    }
   }
 
   // Extract widget config from HTML if present
@@ -1616,6 +1783,7 @@ export async function generateSceneActions(
   options: SceneActionsOptions = {},
 ): Promise<Action[]> {
   const { ctx, agents, userProfile, languageDirective } = options;
+  aiCall = withSourceRequirement(aiCall, options.userRequirements);
   const log = options.logger ?? noopGenerationLogger;
   const agentsText = formatAgentsForPrompt(agents);
 
@@ -1686,6 +1854,9 @@ export async function generateSceneActions(
   }
 
   if (outline.type === 'interactive' && 'html' in content) {
+    const codeBoundCorrection =
+      options.userRequirements?.codeContextRequired === true && outline.widgetType === 'simulation';
+    if (codeBoundCorrection) return correctionWidgetGuidance(content, options.targetLanguage);
     const config = outline.interactiveConfig;
     const agentsText = formatAgentsForPrompt(agents);
     // Always recompute the inventory from the current html so it matches what
